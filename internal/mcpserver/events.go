@@ -196,6 +196,10 @@ func (e *eventer) createParams(ctx context.Context, in map[string]any) (hey.Crea
 		Link:     stringParam(in, "link"),
 	}
 
+	if link := stringParam(in, "link"); link != "" && !strings.HasPrefix(link, "http://") && !strings.HasPrefix(link, "https://") {
+		return p, errors.New("link must be an http or https URL")
+	}
+
 	startTime, endTime, zone := stringParam(in, "start_time"), stringParam(in, "end_time"), stringParam(in, "time_zone")
 	if startTime == "" {
 		if endTime != "" || zone != "" {
@@ -217,6 +221,9 @@ func (e *eventer) createParams(ctx context.Context, in map[string]any) (hey.Crea
 		// The instants are placed the way HEY places a wall time, not the way Go does: the
 		// two differ across a change of the clocks.
 		start := timezone.WallClock(startDate, clock, loc)
+		if start.In(loc).Format(clockLayout) != startTime || start.In(loc).Format(time.DateOnly) != startsOn {
+			return p, fmt.Errorf("%s %s does not exist in %s (the clocks skip it); pick another start_time", startsOn, startTime, zone)
+		}
 		switch {
 		case endTime != "":
 			if _, endErr := time.Parse(clockLayout, endTime); endErr != nil {
@@ -292,7 +299,11 @@ func idParam(raw any) (int64, error) {
 			id = 0
 		}
 	case string:
-		id, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("must be a calendar's id, got %v", raw)
+		}
+		id = parsed
 	}
 	if id <= 0 {
 		return 0, fmt.Errorf("must be a calendar's id, got %v", raw)

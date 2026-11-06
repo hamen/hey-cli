@@ -133,6 +133,9 @@ func TestCreateEventParams(t *testing.T) {
 				}
 			},
 		},
+		{name: "a calendar id past int64 is refused", in: map[string]any{"title": "X", "starts_on": "2026-12-01", "calendar_id": "9223372036854775808"}, wantErr: "calendar_id"},
+		{name: "a start time the clocks skip is refused", in: map[string]any{"title": "X", "starts_on": "2026-03-08", "start_time": "02:30", "time_zone": "America/New_York"}, wantErr: "does not exist"},
+		{name: "a link must be http or https", in: map[string]any{"title": "X", "starts_on": "2026-12-01", "link": "javascript:alert(1)"}, wantErr: "http or https"},
 		{name: "title is required", in: map[string]any{"starts_on": "2026-12-01"}, wantErr: "title is required"},
 		{name: "bad date", in: map[string]any{"title": "X", "starts_on": "01/12/2026"}, wantErr: "starts_on must be a date"},
 		{name: "end date before start", in: map[string]any{"title": "X", "starts_on": "2026-12-02", "ends_on": "2026-12-01"}, wantErr: "ends_on is before"},
@@ -184,10 +187,11 @@ func TestNewEventerNeedsEvents(t *testing.T) {
 
 // With two calendars that qualify, the first one wins, as in `hey event add`.
 func TestCreateEventDefaultsToTheFirstQualifyingCalendar(t *testing.T) {
-	cals := append(defaultCalendars(), generated.Calendar{Id: 5, Name: "Side", Owned: true, Kind: "normal"})
+	cals := defaultCalendars()
+	cals = append(cals[:3:3], generated.Calendar{Id: 5, Name: "Side", Owned: true, Kind: "normal"}, cals[3])
 	e := newTestEventer(t, &fakeEvents{calendars: cals})
 	p, err := e.createParams(context.Background(), map[string]any{"title": "X", "starts_on": "2026-12-01"})
-	if err != nil || p.CalendarID != 4 {
+	if err != nil || p.CalendarID != 5 {
 		t.Fatalf("calendar = %d, err = %v", p.CalendarID, err)
 	}
 }
@@ -237,5 +241,12 @@ func TestHandleCreateEventFailureSaysTheOutcomeIsUnknown(t *testing.T) {
 	text := resultText(t, res)
 	if !res.IsError || !strings.Contains(text, "outcome is unknown") || !strings.Contains(text, "Check the calendar") {
 		t.Fatalf("got %s", text)
+	}
+}
+
+func TestExplicitCalendarSkipsTheLookup(t *testing.T) {
+	e := newTestEventer(t, &fakeEvents{listErr: errors.New("must not be called")})
+	if _, err := e.createParams(context.Background(), map[string]any{"title": "X", "starts_on": "2026-12-01", "calendar_id": float64(9)}); err != nil {
+		t.Fatal(err)
 	}
 }
