@@ -5,16 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/basecamp/hey-sdk/go/pkg/generated"
 	hey "github.com/basecamp/hey-sdk/go/pkg/hey"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/basecamp/mcp/gateway"
+
+	"github.com/basecamp/hey-cli/internal/timezone"
 )
 
 // create_event: file a new calendar event.
@@ -43,8 +47,9 @@ const (
 	eventsToolName      = "hey_events"
 	createEventName     = "create_event"
 	calendarKindNormal  = "normal"
-	eventsDescription   = "HEY Calendar events: create_event files a new event. Without start_time the event is all-day. With start_time, time_zone (an IANA name such as Europe/Rome, the zone the clock times are written in) is required; end_time defaults to an hour after the start. calendar_id defaults to the calendar HEY itself files new events on. It does not invite guests, set repeats or reminders, or edit existing events."
+	eventsDescription   = "HEY Calendar events: create_event files a new event. Without start_time the event is all-day. With start_time, time_zone (an IANA name such as Europe/Rome, the zone the clock times are written in) is required; end_time defaults to an hour after the start; an event that runs past midnight needs ends_on set to the next date. calendar_id defaults to the calendar HEY itself files new events on. It does not invite guests, set repeats or reminders, or edit existing events."
 	maxEventTitleLength = 500
+	clockLayout         = "15:04"
 )
 
 var createEventParams = []string{"title", "starts_on", "ends_on", "start_time", "end_time", "time_zone", "calendar_id", "notes", "location", "link"}
@@ -77,9 +82,9 @@ func (e *eventer) tool() *mcp.Tool {
 						"starts_on":   map[string]any{"type": "string", "description": "Start date, YYYY-MM-DD."},
 						"ends_on":     map[string]any{"type": "string", "description": "End date, YYYY-MM-DD. Defaults to starts_on."},
 						"start_time":  map[string]any{"type": "string", "description": "Start clock time, HH:MM. Leave out for an all-day event."},
-						"end_time":    map[string]any{"type": "string", "description": "End clock time, HH:MM. Defaults to an hour after start_time."},
+						"end_time":    map[string]any{"type": "string", "description": "End clock time, HH:MM. Defaults to an hour after start_time. For an end after midnight, also set ends_on to the next date."},
 						"time_zone":   map[string]any{"type": "string", "description": "IANA zone the clock times are written in. Required with start_time."},
-						"calendar_id": map[string]any{"type": []any{"integer", "string"}, "description": "Calendar to file the event on, from list_calendars. Defaults to HEY's own default."},
+						"calendar_id": map[string]any{"type": []any{"integer", "string"}, "description": "Calendar to file the event on (an integer id). Defaults to HEY's own default."},
 						"notes":       map[string]any{"type": "string", "description": "Notes for the event. Plain text."},
 						"location":    map[string]any{"type": "string", "description": "Where it happens."},
 						"link":        map[string]any{"type": "string", "description": "A URL for the event."},
@@ -120,7 +125,7 @@ func (e *eventer) handle(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Ca
 				"start_time":  "HH:MM; leave out for an all-day event",
 				"end_time":    "HH:MM",
 				"time_zone":   "IANA zone name; required with start_time",
-				"calendar_id": "integer",
+				"calendar_id": "integer or numeric string",
 				"notes":       "string",
 				"location":    "string",
 				"link":        "string (URL)",
@@ -137,7 +142,9 @@ func (e *eventer) handle(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Ca
 	}
 	event, err := e.cfg.Events.Create(ctx, params)
 	if err != nil {
-		return gateway.ErrorResult("not created: %v", err), nil
+		// The write may have reached HEY before the call failed, so a retry could file a second
+		// event. The caller has to look before it tries again.
+		return gateway.ErrorResult("create_event failed and the outcome is unknown: %v. Check the calendar before you try again, so the event is not filed twice", err), nil
 	}
 	return gateway.JSONResult(event)
 }
@@ -148,16 +155,19 @@ func (e *eventer) handle(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Ca
 func (e *eventer) createParams(ctx context.Context, in map[string]any) (hey.CreateCalendarEventParams, error) {
 	var p hey.CreateCalendarEventParams
 
-	for key := range in {
+	for key, value := range in {
 		if !slices.Contains(createEventParams, key) {
 			return p, fmt.Errorf("create_event takes no param %q (params: %s)", key, strings.Join(createEventParams, ", "))
+		}
+		if _, isString := value.(string); !isString && value != nil && key != "calendar_id" {
+			return p, fmt.Errorf("%s must be a string", key)
 		}
 	}
 	title := strings.TrimSpace(stringParam(in, "title"))
 	switch {
 	case title == "":
 		return p, errors.New("title is required")
-	case len(title) > maxEventTitleLength:
+	case utf8.RuneCountInString(title) > maxEventTitleLength:
 		return p, fmt.Errorf("title is over %d characters", maxEventTitleLength)
 	}
 	startsOn := stringParam(in, "starts_on")
@@ -181,7 +191,7 @@ func (e *eventer) createParams(ctx context.Context, in map[string]any) (hey.Crea
 	p.StartsAt = startsOn
 	p.EndsAt = endsOn
 	p.Content = hey.EventContentParams{
-		Notes:    stringParam(in, "notes"),
+		Notes:    notesHTML(stringParam(in, "notes")),
 		Location: stringParam(in, "location"),
 		Link:     stringParam(in, "link"),
 	}
@@ -196,27 +206,35 @@ func (e *eventer) createParams(ctx context.Context, in map[string]any) (hey.Crea
 		if zone == "" {
 			return p, errors.New("time_zone is required with start_time (an IANA name such as Europe/Rome)")
 		}
-		loc, zoneErr := time.LoadLocation(zone)
+		loc, zoneErr := timezone.Load(zone)
 		if zoneErr != nil {
 			return p, fmt.Errorf("time_zone %q is not an IANA zone name", zone)
 		}
-		start, clockErr := time.ParseInLocation("2006-01-02 15:04", startsOn+" "+startTime, loc)
+		clock, clockErr := time.Parse(clockLayout, startTime)
 		if clockErr != nil {
 			return p, errors.New("start_time must be a clock time, HH:MM")
 		}
-		var end time.Time
-		if endTime == "" {
-			end = start.Add(time.Hour)
-			p.EndsAt = end.Format(time.DateOnly)
-			endTime = end.Format("15:04")
-		} else {
-			var endErr error
-			if end, endErr = time.ParseInLocation("2006-01-02 15:04", p.EndsAt+" "+endTime, loc); endErr != nil {
+		// The instants are placed the way HEY places a wall time, not the way Go does: the
+		// two differ across a change of the clocks.
+		start := timezone.WallClock(startDate, clock, loc)
+		switch {
+		case endTime != "":
+			if _, endErr := time.Parse(clockLayout, endTime); endErr != nil {
 				return p, errors.New("end_time must be a clock time, HH:MM")
 			}
+		case stringParam(in, "ends_on") != "":
+			// A caller-supplied end date stays; only the clock time defaults.
+			endTime = clock.Add(time.Hour).Format(clockLayout)
+		default:
+			end := start.Add(time.Hour).In(loc)
+			if placed := timezone.WallClock(end, end, loc); !placed.Equal(end) {
+				return p, errors.New("an hour after the start falls on a clock time that repeats as the clocks go back; pass end_time")
+			}
+			p.EndsAt, endTime = end.Format(time.DateOnly), end.Format(clockLayout)
 		}
-		if !end.After(start) {
-			return p, errors.New("the event ends before it starts")
+		end, ok := timezone.Placed(p.EndsAt, endTime, loc)
+		if !ok || !end.After(start) {
+			return p, errors.New("the event ends before it starts; for an end after midnight, pass ends_on as the next date")
 		}
 		p.StartTime, p.EndTime = startTime, endTime
 		p.StartTimeZone, p.EndTimeZone = zone, zone
@@ -251,6 +269,15 @@ func isDefaultEventCalendar(c generated.Calendar) bool {
 	return c.Owned && !c.Personal && !c.External && c.Kind == calendarKindNormal
 }
 
+// notesHTML turns plain text into the HTML HEY's Trix field takes, so "<budget>" and line
+// breaks survive.
+func notesHTML(text string) string {
+	if text == "" {
+		return ""
+	}
+	return strings.ReplaceAll(html.EscapeString(text), "\n", "<br>")
+}
+
 func stringParam(in map[string]any, key string) string {
 	s, _ := in[key].(string)
 	return strings.TrimSpace(s)
@@ -265,7 +292,7 @@ func idParam(raw any) (int64, error) {
 			id = 0
 		}
 	case string:
-		id, _ = strconv.ParseInt(v, 10, 64)
+		id, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	}
 	if id <= 0 {
 		return 0, fmt.Errorf("must be a calendar's id, got %v", raw)

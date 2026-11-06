@@ -2,9 +2,12 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/basecamp/hey-sdk/go/pkg/generated"
 	hey "github.com/basecamp/hey-sdk/go/pkg/hey"
@@ -82,6 +85,54 @@ func TestCreateEventParams(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "an explicit ends_on stays when only the end time is left out",
+			in:   map[string]any{"title": "Retreat", "starts_on": "2026-12-01", "ends_on": "2026-12-03", "start_time": "10:00", "time_zone": "Europe/Rome"},
+			check: func(t *testing.T, p hey.CreateCalendarEventParams) {
+				if p.EndsAt != "2026-12-03" || p.EndTime != "11:00" {
+					t.Fatalf("got %+v", p)
+				}
+			},
+		},
+		{
+			name: "an end after midnight works with the next date",
+			in:   map[string]any{"title": "Late", "starts_on": "2026-12-01", "ends_on": "2026-12-02", "start_time": "23:30", "end_time": "00:30", "time_zone": "Europe/Rome"},
+			check: func(t *testing.T, p hey.CreateCalendarEventParams) {
+				if p.EndsAt != "2026-12-02" || p.EndTime != "00:30" {
+					t.Fatalf("got %+v", p)
+				}
+			},
+		},
+		{
+			name:    "an end after midnight without the next date is refused",
+			in:      map[string]any{"title": "Late", "starts_on": "2026-12-01", "start_time": "23:30", "end_time": "00:30", "time_zone": "Europe/Rome"},
+			wantErr: "pass ends_on as the next date",
+		},
+		{
+			name:    "a default end on a clock time that repeats is refused",
+			in:      map[string]any{"title": "Fall back", "starts_on": "2026-11-01", "start_time": "01:30", "time_zone": "America/New_York"},
+			wantErr: "repeats as the clocks go back",
+		},
+		{
+			name: "notes are escaped into HTML",
+			in:   map[string]any{"title": "X", "starts_on": "2026-12-01", "notes": "Discuss <budget>\nBring slides"},
+			check: func(t *testing.T, p hey.CreateCalendarEventParams) {
+				if p.Content.Notes != "Discuss &lt;budget&gt;<br>Bring slides" {
+					t.Fatalf("got %q", p.Content.Notes)
+				}
+			},
+		},
+		{name: "a non-string note is refused", in: map[string]any{"title": "X", "starts_on": "2026-12-01", "notes": float64(5)}, wantErr: "notes must be a string"},
+		{name: "Local is not a zone", in: map[string]any{"title": "X", "starts_on": "2026-12-01", "start_time": "10:00", "time_zone": "Local"}, wantErr: "not an IANA zone"},
+		{
+			name: "a string calendar id with spaces is trimmed",
+			in:   map[string]any{"title": "X", "starts_on": "2026-12-01", "calendar_id": " 9 "},
+			check: func(t *testing.T, p hey.CreateCalendarEventParams) {
+				if p.CalendarID != 9 {
+					t.Fatalf("got %+v", p)
+				}
+			},
+		},
 		{name: "title is required", in: map[string]any{"starts_on": "2026-12-01"}, wantErr: "title is required"},
 		{name: "bad date", in: map[string]any{"title": "X", "starts_on": "01/12/2026"}, wantErr: "starts_on must be a date"},
 		{name: "end date before start", in: map[string]any{"title": "X", "starts_on": "2026-12-02", "ends_on": "2026-12-01"}, wantErr: "ends_on is before"},
@@ -128,5 +179,63 @@ func TestCreateEventNeedsADefaultCalendar(t *testing.T) {
 func TestNewEventerNeedsEvents(t *testing.T) {
 	if _, err := newEventer(EventsConfig{}); err == nil {
 		t.Fatal("want an error")
+	}
+}
+
+// With two calendars that qualify, the first one wins, as in `hey event add`.
+func TestCreateEventDefaultsToTheFirstQualifyingCalendar(t *testing.T) {
+	cals := append(defaultCalendars(), generated.Calendar{Id: 5, Name: "Side", Owned: true, Kind: "normal"})
+	e := newTestEventer(t, &fakeEvents{calendars: cals})
+	p, err := e.createParams(context.Background(), map[string]any{"title": "X", "starts_on": "2026-12-01"})
+	if err != nil || p.CalendarID != 4 {
+		t.Fatalf("calendar = %d, err = %v", p.CalendarID, err)
+	}
+}
+
+func callEvents(t *testing.T, e *eventer, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.handle(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: raw}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestHandleCreateEvent(t *testing.T) {
+	f := &fakeEvents{calendars: defaultCalendars()}
+	e := newTestEventer(t, f)
+
+	res := callEvents(t, e, map[string]any{"action": "create_event", "params": map[string]any{"title": "Dentist", "starts_on": "2026-12-01"}})
+	if res.IsError || len(f.created) != 1 || f.created[0].Title != "Dentist" || f.created[0].CalendarID != 4 {
+		t.Fatalf("error = %v, created = %+v, text = %s", res.IsError, f.created, resultText(t, res))
+	}
+
+	res = callEvents(t, e, map[string]any{"action": "create_event", "params": map[string]any{"starts_on": "2026-12-01"}})
+	if !res.IsError || len(f.created) != 1 || !strings.Contains(resultText(t, res), "not created") {
+		t.Fatalf("bad input must not write: %s", resultText(t, res))
+	}
+
+	res = callEvents(t, e, map[string]any{"action": "describe"})
+	if res.IsError || !strings.Contains(resultText(t, res), "time_zone") {
+		t.Fatalf("describe: %s", resultText(t, res))
+	}
+
+	res = callEvents(t, e, map[string]any{"action": "update_event"})
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown action") {
+		t.Fatalf("unknown action: %s", resultText(t, res))
+	}
+}
+
+func TestHandleCreateEventFailureSaysTheOutcomeIsUnknown(t *testing.T) {
+	f := &fakeEvents{calendars: defaultCalendars(), createErr: errors.New("timeout")}
+	e := newTestEventer(t, f)
+	res := callEvents(t, e, map[string]any{"action": "create_event", "params": map[string]any{"title": "Dentist", "starts_on": "2026-12-01"}})
+	text := resultText(t, res)
+	if !res.IsError || !strings.Contains(text, "outcome is unknown") || !strings.Contains(text, "Check the calendar") {
+		t.Fatalf("got %s", text)
 	}
 }
