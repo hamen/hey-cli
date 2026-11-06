@@ -103,6 +103,12 @@ action's parameter schema. Listings with more pages come back as
 `page` parameter. The posting-changes feed's last page comes back as
 `{"next_since": ..., "next_v": ..., "results": ...}` — the cursor for the next
 incremental poll, passed back as the action's `since` and `v` parameters.
+Creating a calendar event is one action in a tool of its own: `hey_events`'s
+`create_event` (title, `starts_on`, optional `start_time` with a required `time_zone`,
+`end_time`, `ends_on`, `calendar_id`, notes, location, link). It is written by hand
+because hey-sdk does not model event create or update yet. It does not take guests,
+repeats or reminders, and it does not edit existing events: use `hey event add` / `edit`
+for those. It is served only when calendar is served and the server isn't `--read-only`.
 Mutations are never retried automatically: a 429/503 on a write surfaces to
 the caller rather than risking a duplicate delivery, so retry a failed write
 yourself once you know it did not land. Logs go to stderr — stdout carries

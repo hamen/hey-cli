@@ -100,6 +100,27 @@ func (a mcpAPI) Delete(ctx context.Context, path string) (*hey.Response, error) 
 	return a.writes.Delete(ctx, path)
 }
 
+// mcpEvents is create_event's way into HEY: the write goes through the client that never
+// retries, the calendar lookup through the one that reads.
+type mcpEvents struct {
+	reads, writes *hey.Client
+}
+
+func (e mcpEvents) Create(ctx context.Context, params hey.CreateCalendarEventParams) (*generated.Recording, error) {
+	return e.writes.CalendarEvents().Create(ctx, params)
+}
+
+func (e mcpEvents) ListCalendars(ctx context.Context) ([]generated.Calendar, error) {
+	return calendarsFrom(e.reads.Calendars().List(ctx))
+}
+
+func calendarsFrom(payload *generated.CalendarListPayload, err error) ([]generated.Calendar, error) {
+	if err != nil {
+		return nil, err
+	}
+	return unwrapCalendars(payload), nil
+}
+
 func (c *mcpCommand) run(cmd *cobra.Command, args []string) error {
 	// hey mcp serves on its own credential, never the CLI's (mcp_auth.go).
 	creds, err := requireMCPCredentials()
@@ -133,6 +154,9 @@ func (c *mcpCommand) run(cmd *cobra.Command, args []string) error {
 	// send, no hey_send.
 	readOnly := c.readOnly || !auth.HasScope(creds.Scope, "write")
 	serverCfg := mcpserver.Config{ReadOnly: readOnly, Domains: c.domains}
+	if !readOnly {
+		serverCfg.Events = &mcpserver.EventsConfig{Events: mcpEvents{reads: reads, writes: writes}}
+	}
 	canSend := mcpCanSend(creds)
 	if canSend && !readOnly {
 		origin, originErr := config.Origin(cfg.BaseURL)

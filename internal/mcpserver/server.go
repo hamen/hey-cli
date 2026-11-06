@@ -30,13 +30,18 @@ type Config struct {
 	// tool (send.go) when the threads domain is served and the server isn't read-only.
 	// Nil serves no way to send.
 	Send *SendConfig
+
+	// Events is set to serve create_event in its own hey_events tool, when the calendar
+	// domain is served and the server isn't read-only (events.go). Nil serves none.
+	Events *EventsConfig
 }
 
 // Server wraps the toolkit gateway serving hey's derived catalog, dispatching
 // through the CLI's authenticated SDK client.
 type Server struct {
-	gw     *gateway.Server
-	sender *sender
+	gw      *gateway.Server
+	sender  *sender
+	eventer *eventer
 }
 
 // New derives the catalog and hands it to the gateway, which applies the
@@ -61,6 +66,13 @@ func New(api API, cfg Config) (*Server, error) {
 		}
 	}
 
+	var events *eventer
+	if cfg.Events != nil && !cfg.ReadOnly && servesDomain(cfg.Domains, "calendar") {
+		if events, err = newEventer(*cfg.Events); err != nil {
+			return nil, fmt.Errorf("serve create_event: %w", err)
+		}
+	}
+
 	gw, err := gateway.New(cat.GatewayDomains(), gateway.Config{
 		ReadOnly: cfg.ReadOnly,
 		Domains:  cfg.Domains,
@@ -70,12 +82,17 @@ func New(api API, cfg Config) (*Server, error) {
 		return nil, err
 	}
 
-	return &Server{gw: gw, sender: send}, nil
+	return &Server{gw: gw, sender: send, eventer: events}, nil
 }
 
 // servesDomain reports whether a domain selection includes key; empty selects all.
 func servesDomain(selected []string, key string) bool {
 	return len(selected) == 0 || slices.Contains(selected, key)
+}
+
+// ServesEvents reports whether create_event is served.
+func (s *Server) ServesEvents() bool {
+	return s.eventer != nil
 }
 
 // ServesSend reports whether send_draft is served.
@@ -95,6 +112,9 @@ func (s *Server) BuildMCPServer(logger *slog.Logger) *mcp.Server {
 	if s.sender != nil {
 		server.AddTool(s.sender.tool(), s.sender.handle)
 		server.AddReceivingMiddleware(offerSendToClientsThatCanAsk)
+	}
+	if s.eventer != nil {
+		server.AddTool(s.eventer.tool(), s.eventer.handle)
 	}
 	return server
 }

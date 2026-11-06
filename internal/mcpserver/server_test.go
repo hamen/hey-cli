@@ -142,3 +142,29 @@ func TestServerRequiresAPI(t *testing.T) {
 		t.Error("nil API did not error")
 	}
 }
+
+func TestServerServesEventsOnlyWhenWritable(t *testing.T) {
+	events := &EventsConfig{Events: &fakeEvents{}}
+	for _, tt := range []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{"configured", Config{Events: events}, true},
+		{"not configured", Config{}, false},
+		{"read only", Config{Events: events, ReadOnly: true}, false},
+		{"calendar not served", Config{Events: events, Domains: []string{"boxes"}}, false},
+		{"calendar served", Config{Events: events, Domains: []string{"calendar"}}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, session := connect(t, &fakeAPI{}, tt.cfg)
+			if srv.ServesEvents() != tt.want {
+				t.Fatalf("ServesEvents = %v, want %v", srv.ServesEvents(), tt.want)
+			}
+			_, listed := mcptest.ListTools(t, session)[eventsToolName]
+			if listed != tt.want {
+				t.Fatalf("hey_events listed = %v, want %v", listed, tt.want)
+			}
+		})
+	}
+}
