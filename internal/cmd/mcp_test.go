@@ -201,8 +201,8 @@ func TestMCPCommandServesMCP(t *testing.T) {
 		}
 		names = append(names, tool.Name)
 	}
-	if len(names) != 8 || !slices.Contains(names, "hey_send") {
-		t.Fatalf("tools = %v, want the 7 domain tools and hey_send", names)
+	if len(names) != 9 || !slices.Contains(names, "hey_send") || !slices.Contains(names, "hey_events") {
+		t.Fatalf("tools = %v, want the 7 domain tools, hey_events and hey_send", names)
 	}
 
 	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
@@ -377,8 +377,8 @@ func TestMCPCommandServesWhatTheGrantAllows(t *testing.T) {
 
 	t.Run("send unchecked", func(t *testing.T) {
 		names := toolNames(t, runMCPCommandWith(t, upstream, "read write", askingClient()))
-		if slices.Contains(names, "hey_send") || len(names) != 7 {
-			t.Errorf("tools = %v, want the 7 domain tools and no hey_send", names)
+		if slices.Contains(names, "hey_send") || len(names) != 8 {
+			t.Errorf("tools = %v, want the 7 domain tools, hey_events and no hey_send", names)
 		}
 	})
 	t.Run("read only", func(t *testing.T) {
@@ -398,8 +398,8 @@ func TestMCPCommandServesWhatTheGrantAllows(t *testing.T) {
 		}
 	})
 	t.Run("a client that can't be asked", func(t *testing.T) {
-		if names := toolNames(t, runMCPCommand(t, upstream)); slices.Contains(names, "hey_send") || len(names) != 7 {
-			t.Errorf("tools = %v, want the 7 domain tools and no hey_send for a client that can't confirm a send", names)
+		if names := toolNames(t, runMCPCommand(t, upstream)); slices.Contains(names, "hey_send") || len(names) != 8 {
+			t.Errorf("tools = %v, want the 7 domain tools, hey_events and no hey_send for a client that can't confirm a send", names)
 		}
 	})
 }
